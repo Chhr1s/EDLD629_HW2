@@ -1,0 +1,234 @@
+---
+title: "Loan_EDLD629_Homework2"
+author: "Christopher Loan"
+date: "4/30/2021"
+output: 
+  rmdformats::material:
+    code_folding: show
+    thumbnails: true
+    lightbox: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r eval = T, include = F}
+library(lme4)
+library(nlme)
+library(tidyverse)
+library(sundry)
+library(performance)
+```
+
+# 1. Data
+
+```{r}
+dat <- 
+  rio::import(
+    here::here('Data', 'alcohol-adolescents.csv')
+    ) %>% 
+  tibble() %>% 
+  mutate(coa = factor(coa), 
+         male = factor(male),
+         id = factor(id), 
+         wave = age - 14)
+head(dat, 2)
+```
+
+# 2. Initial Fits {.tabset}
+
+## random intercept, parallel slopes
+
+```{r}
+
+mod1 <-
+  lmer(
+    data = dat,
+    formula = alcuse ~ 1 + wave + (1 | id)
+  )
+mod1_cr <- 
+  pull_residual_vcov(mod1)[1:3, 1:3]
+```
+
+## random intercept, random slopes
+
+```{r}
+mod2 <-
+  lmer(
+    data = dat,
+    formula = alcuse ~ 1 + wave + (1 + wave | id)
+  )
+mod2_cr <- 
+  pull_residual_vcov(mod2)[1:3, 1:3]
+```
+
+## compare the two
+
+```{r}
+anova(mod1, mod2) %>% 
+  gt::gt()
+```
+
+`mod2` fits better than `mod1` by AIC and significant chi-square test of deviance. BIC, however, is inconclusive.
+
+# 3. Alternative residual VCOV {.tabset}
+
+## a. autoregressive
+
+```{r}
+ar1 <- gls(
+  data = dat,
+  alcuse ~ 1 + wave, 
+  correlation = 
+    corAR1(form = ~ 1 | id)
+  )
+ar1_cr <- 
+  corMatrix(ar1$modelStruct$corStruct)[[1]] 
+```
+
+## b. heterogenous autoregressive
+
+```{r}
+het_ar <- gls(
+  data = dat,
+  alcuse ~ 1 + wave, 
+  correlation = 
+    corAR1(form = ~ 1 | id),
+  ## different weights for each timepoint
+  weights = varIdent(form = ~ 1 | wave)
+  )
+het_ar_cr <- 
+  corMatrix(het_ar$modelStruct$corStruct)[[1]] 
+```
+
+## c. Toeplitz Structures
+
+```{r}
+toeplitz <- gls(
+  data = dat,
+  alcuse ~ 1 + wave, 
+  correlation = 
+    corARMA(form = ~ 1|id, p = 3)
+  )
+toeplitz_cr <- 
+  corMatrix(toeplitz$modelStruct$corStruct)[[1]] 
+```
+ 
+## composite residuals {.tabset .tabset-pills}
+
+### parallel slopes
+
+```{r}
+mod1_cr
+```
+
+### random slopes
+
+```{r}
+mod2_cr
+```
+
+### AR1
+
+```{r}
+ar1_cr
+```
+
+### heterogenous AR
+
+```{r}
+het_ar_cr
+```
+
+### Toeplitz 
+
+```{r}
+toeplitz_cr
+```
+
+# 4. Comparing Models {.tabset}
+
+```{r}
+compare_performance(
+  mod1, mod2, ar1, het_ar, toeplitz
+  ) %>% 
+  mutate_if(is.numeric, round, 2) %>% 
+  gt::gt()
+```
+
+No model is better than all other models according to both AIC and BIC. The AR1 model appears to be the best mixture of explanatory capability and model parsimony. I'm basing this mostly on BIC. 
+
+According to AIC, the heterogeneous autoregressive model is basically equivalent to the AR1 model, but BIC may be preferred in this case due to its penalization based on number of estimated parameters. Unsurprisingly, models with unstructured residuals have lower RMSE, however, this is likely due to overfitting to the data and the AR1 (or heterogenous autoregressive) better approximates the population without overfitting to the sample.
+
+I'll continue with the assumption that the AR1 model fits the data best.
+
+# 5. Adding Predictors {.tabset}
+
+## including covariates (coa & peer)
+
+```{r}
+ar1_cov1 <- gls(
+  data = dat,
+  alcuse ~ 1 + wave + peer + coa, 
+  correlation = 
+    corAR1(form = ~ 1 | id)
+  )
+summary(ar1_cov1)
+```
+
+## evalute if trajectories depend on covariates (i.e., interactions) {.tabset .tabset-pills}
+
+### based on significance
+
+```{r}
+ar1_cov2 <- gls(
+  data = dat,
+  alcuse ~ 1 + wave + peer + coa + peer:wave + coa:wave, 
+  correlation = 
+    corAR1(form = ~ 1 | id)
+  )
+summary(ar1_cov2)
+```
+
+### based on model fit
+
+```{r}
+compare_performance(
+  ar1, ar1_cov1, ar1_cov2
+  ) %>% 
+  mutate_if(is.numeric, round, 2) %>% 
+  gt::gt()
+```
+
+Peer use and being a child of an alcoholic do lead to higher alcohol use, but they do not appear to influence the trajectories of alcohol use based on non-significant interaction terms. This is further supported by the best fitting model (based on BIC) being the model with their inclusion as fixed effects predictors of alcohol use, but not of their interaction with slope. 
+
+# 6. Plots {.tabset}
+
+```{r}
+dat %>% 
+  mutate(
+    prediction = predict(ar1_cov1), 
+    coa = 
+      factor(
+        coa, 
+        levels = 0:1, 
+        labels = c('Not COA', 'COA')
+        )) %>% 
+  ggplot(
+    aes(
+      x = wave, 
+      y = prediction, 
+      color = factor(round(peer))
+      )) + 
+  geom_smooth(method = 'lm', se = F) +
+  facet_wrap(~coa) +
+  theme_minimal() +
+  labs(color = 'Approx.\nLevel of\nPeer Use', 
+       caption = 'Level of peer use = rounded factor of `peer` variable')
+```
+
+
+I couldn't quite figure out why you had 3 lines instead of 4. What I did was rounded the peer variable and then created a factor. 
+
+I tried `floor()` which was pretty close, but then the estimate of the middle group was different from yours. To me, it looks like you filtered out those who were in the highest group of peer alcohol use; I just left them in.
